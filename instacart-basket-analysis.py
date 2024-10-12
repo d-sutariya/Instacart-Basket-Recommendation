@@ -1,4 +1,5 @@
-!pip install pyspark
+# %% [code]
+# !pip install pyspark 
 
 import time
 import pyspark
@@ -6,14 +7,6 @@ import numpy as np
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
 from pyspark.sql.types import LongType, DoubleType
-
-# Create a SparkSession with custom memory settings
-spark = SparkSession.builder.appName("instamart_analysis") \
-    .config("spark.driver.memory","25g") \
-    .getOrCreate()
-
-def show_time(start):
-    return time.time() - start
 
 
 # How often user has reordered
@@ -27,8 +20,7 @@ class FeatureGenerator:
         self.test_set = test_set
 
     def generate_user_related_features(self):
-
-
+        
         df_with_num_of_reord = (
             prior_product_orders.select("reordered", "order_id")
             .join(prior_orders_df.select("user_id", "order_id"), how="left", on="order_id")
@@ -103,6 +95,7 @@ class FeatureGenerator:
         long_cols = [field.name for field in result_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
         result_df = result_df.withColumns(columns_to_cast)
+        return result_df
         
     def generate_product_related_features(self):
                 
@@ -265,7 +258,8 @@ class FeatureGenerator:
         long_cols = [field.name for field in result_product_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
         result_product_df = result_product_df.withColumns(columns_to_cast)
-
+        return result_product_df
+        
     def generate_user_product_related_features(self):
         
         # Number of orders in which the user purchases the item
@@ -313,10 +307,12 @@ class FeatureGenerator:
         long_cols = [field.name for field in result_usr_prod_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
         result_usr_prod_df = result_usr_prod_df.withColumns(columns_to_cast)
-
+        return result_usr_prod_df
 
     def generate_time_related_features(self):
         # Counts by day of the week
+        result_df = self.generate_user_related_features()
+        
         df_with_count_of_dow = (
             prior_orders_df.select("order_id", "order_dow")
             .groupBy("order_dow")
@@ -338,10 +334,14 @@ class FeatureGenerator:
         long_cols = [field.name for field in result_df_with_time_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
         result_df_with_time_df = result_df_with_time_df.withColumns(columns_to_cast)
-
+        return result_df_with_time_df
 
 
     def generate_all_types_of_features(self):
+        
+        result_usr_prod_df = self.generate_user_product_related_features()
+        result_df_with_time_df = self.generate_time_related_features()
+        result_product_df = self.generate_product_related_features()
         
         final_prior_ord_train_df = (
             result_usr_prod_df
@@ -349,22 +349,31 @@ class FeatureGenerator:
             .join(result_product_df.drop("user_id"), (F.col("product_id_p") == result_product_df['ppo1.product_id']), how="left")
             .drop("product_id")
         )
+        return final_prior_ord_train_df
 
         
-
-    def generate_test_set_features(self,train_set,test_set=None):
+def generate_test_set_features(self,train_set,test_set):
         
-        if (self.test_set == None) and (test_set == None):
-            raise NameError("You haven't provide test_set")
-            
-        elif "user_id" is not in test_set.columns and "product_id" is not in test_set.columns:
-            raise NameError("'user_id' and 'product_id' both are missing in test_set")
-            
-        elif "user_id" is not in test_set.columns:
-            raise NameError("'user_id' not found in test_set")
-            
-        elif "product_id" is not in test_set.columns:
-            raise NameError("'product_id' not found in test_set")
-            
-        elif test_set != None:
-            pass
+    if  test_set == None:
+        raise NameError("You haven't provide test_set")
+        
+    elif "user_id"  not in test_set.columns and "product_id" not in test_set.columns:
+        raise NameError("'user_id' and 'product_id' both are missing in test_set")
+        
+    elif "user_id" not in test_set.columns:
+        raise NameError("'user_id' not found in test_set")
+        
+    elif "product_id" not in test_set.columns:
+        raise NameError("'product_id' not found in test_set")
+        
+    else:
+        result_test_df = (
+            test_set.join(
+                train_set,
+                (train_set['user_id'] == test_set['user_id']) &
+                (train_set['product_id'] == test_set['product_id'])
+                , how = 'inner'
+            )
+        )
+        
+    return result_test_df
