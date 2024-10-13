@@ -1,6 +1,4 @@
-# %% [code]
-# %% [code] {"jupyter":{"outputs_hidden":false}}
-# !pip install pyspark 
+
 
 import time
 import pyspark
@@ -326,7 +324,7 @@ class FeatureGenerator:
             .groupBy("order_hour_of_day")
             .agg(F.count("order_id").alias("total_ord_count_p_ohod"))
         )
-        result_df_with_time_df = (
+        result_time_df = (
             result_df.join(df_with_count_of_dow, on="order_dow", how="left")
             .join(df_with_count_of_ohod, on="order_hour_of_day", how="left")
         )
@@ -351,15 +349,23 @@ class FeatureGenerator:
             .drop("product_id")
             .withColumnsRenamed({"user_id_p":"user_id","product_id_p":"product_id"})
         )
+        
         return final_prior_ord_train_df
 
         
-def generate_test_set_features(train_set,test_set):
+def generate_test_set_features(user_stats_df,prods_stats_df,user_prod_stats_df,time_related_stats,test_set):
         
-    if  test_set == None:
-        raise NameError("You haven't provide test_set")
+    df_list = [user_stats_df,prods_stats_df,user_prod_stats_df]
+    
+    for i in df_list:
         
-    elif "user_id"  not in test_set.columns and "product_id" not in test_set.columns:
+        if "user_id" not in i.columns:
+            raise NameError(f"'user_id' is missing in {i}")
+        
+        elif "product_id" not in i.columns:
+            raise NameError(f"'product_id' is missing in {i}")
+        
+    if "user_id"  not in test_set.columns and "product_id" not in test_set.columns:
         raise NameError("'user_id' and 'product_id' both are missing in test_set")
         
     elif "user_id" not in test_set.columns:
@@ -369,15 +375,29 @@ def generate_test_set_features(train_set,test_set):
         raise NameError("'product_id' not found in test_set")
         
     else:
-        train_set = train_set.withColumnsRenamed({"user_id":"user_id_tr","product_id":"product_id_tr"})
+        mean_dow_value = time_related_stats.groupBy("order_dow").agg(
+            F.mean("total_ord_count_p_dow")
+        ).collect()[0][0]
+        
+        mean_ohod_value = time_related_stats.groupBy("order_hour_of_day").agg(
+            F.mean("total_ord_count_p_ohod")
+        ).collect()[0][0]
+        
         result_test_df = (
+              
             test_set.join(
-                train_set,
-                (train_set['user_id_tr'] == test_set['user_id']) &
-                (train_set['product_id_tr'] == test_set['product_id'])
-                , how = 'inner'
+                user_stats_df, on = 'user_id', how = 'inner'
             )
-            .drop("user_id_tr","product_id_tr")
+            .join(
+                prods_stats_df, on = 'product_id', how = 'inner'
+            )
+            .join(
+                user-prod_stats_df, on = ['user_id','product_id'], how = 'inner'
+            )
+            .withColumns({
+                          "time_mean_dow_count":F.lit(mean_dow_value),
+                          "time_mean_ohod_count":F.lit(mean_ohod_value)
+            })
         )
         
     return result_test_df
