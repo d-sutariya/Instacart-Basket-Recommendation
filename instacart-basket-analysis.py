@@ -1,11 +1,9 @@
-
-
 import time
 import pyspark
 import numpy as np
 from pyspark.sql import SparkSession, Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import LongType, DoubleType
+from pyspark.sql.types import LongType, DoubleType , StringType
 
 
 # How often user has reordered
@@ -25,17 +23,10 @@ class FeatureGenerator:
             .join(self.prior_orders_df.select("user_id", "order_id"), how="left", on="order_id")
             .select("user_id", "reordered")
             .groupBy("user_id")
-            .agg(F.count(F.col("reordered")).alias("frequency of reorder"))
+            .agg(F.count(F.col("reordered")).alias("frequency_of_reorder"))
         )
         
-        # Time since previous order
-        df_with_time_since_prev_ord = (
-            self.prior_orders_df.select("user_id", "days_since_prior_order", "order_hour_of_day", "order_number", "order_id")
-            .withColumn("privious_order_hour", F.lag("order_hour_of_day", 1).over(Window.partitionBy("user_id").orderBy("order_number")))
-            .withColumn("time_since_Last_order", F.col("days_since_prior_order") * 24 + F.col("order_hour_of_day") - F.col("privious_order_hour"))
-            .select("order_id", "time_since_last_order")
-        )
-        
+   
         # Time of the day user visits
         df_with_time_of_day_usr_visits = (
             self.prior_orders_df.select("user_id", "order_hour_of_day", "order_id")
@@ -58,7 +49,11 @@ class FeatureGenerator:
                         F.expr("exists(normalized_list, x -> x like '%asian%')") |
                         F.expr("exists(normalized_list, x -> x like '%gluten free%')")
             )
-            .select("order_id", "contains_or_not")
+            .groupBy("user_id")
+            .agg(
+                F.sum(F.col("contains_or_not").cast("int")).alias("count_of_asian_org_items"),
+                F.mean(F.col("contains_or_not").cast("int")).alias("mean_of_asian_org_items")
+            )
         )
         
         # Feature based on order size
@@ -77,19 +72,21 @@ class FeatureGenerator:
         df_with_freq_ord_that_hasnt_prev_purch_items = (
             self.prior_product_orders.select("order_id", "reordered")
             .join(self.prior_orders_df.select("order_id", "user_id"), on='order_id', how='left')
-            .groupBy("user_Id", "order_id")
+            .groupBy("user_id", "order_id")
             .agg(F.collect_list(F.col("reordered")).alias("reordered_array"))
             .withColumn("doesnt_contains_reordered", F.when(F.array_contains("reordered_array", 1), 0).otherwise(1))
-            .select("order_id", "doesnt_contains_reordered")
+            .groupBy("user_id")
+            .agg(
+                F.sum("doesnt_contains_reordered").alias("count_ord_no_prev_purchased_items"),
+                F.mean("doesnt_contains_reordered").alias("mean_ord_no_prev_purchased_items")    
+            )
         )
 
         result_df = (
-            self.prior_orders_df
-            .join(df_with_num_of_reord, on="user_id", how='left')
-            .join(df_with_time_since_prev_ord, on="order_id", how="left")
-            .join(df_with_does_usr_asian_gluten_orga_items_ord, on="order_id", how='left')
+            df_with_num_of_reord
+            .join(df_with_does_usr_asian_gluten_orga_items_ord, on="user_id", how='left')
             .join(df_with_fets_of_ord_size, on="user_id", how='left')
-            .join(df_with_freq_ord_that_hasnt_prev_purch_items, on="order_id", how='left')
+            .join(df_with_freq_ord_that_hasnt_prev_purch_items, on="user_id", how='left')
         )
         long_cols = [field.name for field in result_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
@@ -244,14 +241,13 @@ class FeatureGenerator:
             df_with_avg_position_of_prod
             .join(df_with_freq_one_shot_ord_prods, on="product_id", how='left')
             .join(df_with_freq_co_ocrd, on="product_id", how='left')
-            .join(df_with_avg_num_item_co_ocrd_in_ord, df_with_avg_num_item_co_ocrd_in_ord["ppo1.product_id"] == self.prior_product_orders["product_id"], how="left")
+            .join(df_with_avg_num_item_co_ocrd_in_ord, on = 'product_id', how="left")
             .join(df_with_stats_of_streaks, on="product_id", how='left')
             .join(df_with_prob_greater_5, on="product_id", how="left")
             .join(df_with_prob_greater_3, on="product_id", how="left")
             .join(df_with_prob_greater_2, on="product_id", how="left")
             .join(df_with_count_of_dow_p_prod, on="product_id", how="left")
             .join(df_with_prob_reord, on="product_id", how="left")
-            .join(self.products_df.drop("product_name"), on="product_id", how="left")
         )
 
         long_cols = [field.name for field in result_product_df.schema.fields if isinstance(field.dataType, LongType)]
@@ -289,20 +285,14 @@ class FeatureGenerator:
         )
 
         result_usr_prod_df = (
-            self.prior_product_orders
-            .withColumnRenamed("product_id", "product_id_p")
-            .alias("ppo")
-            .join(self.prior_orders_df.select("user_id", "order_id").withColumnRenamed("user_id", "user_id_p").alias("pod"), on="order_id", how="left")
-            .join(df_with_num_of_order_p_product,
-                  (F.col("pod.user_id_p") == df_with_num_of_order_p_product['user_id']) &
-                  (F.col("ppo.product_id_p") == df_with_num_of_order_p_product['product_id']), how="left").drop("user_id", "product_id")
+            df_with_num_of_order_p_product
             .join(df_with_position_cart_p_usr_p_prod,
-                  (df_with_position_cart_p_usr_p_prod["user_id"] == F.col("pod.user_id_p")) &
-                  (df_with_position_cart_p_usr_p_prod["product_id"] == F.col("ppo.product_id_p")), how="left").drop("user_id", "product_id")
+                  on = ['user_id','product_id'], how="left"
+                 )
             .join(df_with_co_ocrd_stats_p_user_p_prod,
-                  (df_with_co_ocrd_stats_p_user_p_prod["user_id"] == F.col("pod.user_id_p")) &
-                  (df_with_co_ocrd_stats_p_user_p_prod["product_id"] == F.col("ppo.product_id_p")), how="left").drop("user_id", "product_id")
-        )
+                  on = ['user_id','product_id'], how="left"
+                 )
+        )   
         long_cols = [field.name for field in result_usr_prod_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
         result_usr_prod_df = result_usr_prod_df.withColumns(columns_to_cast)
@@ -324,45 +314,63 @@ class FeatureGenerator:
             .groupBy("order_hour_of_day")
             .agg(F.count("order_id").alias("total_ord_count_p_ohod"))
         )
+            
         result_time_df = (
-            result_df.join(df_with_count_of_dow, on="order_dow", how="left")
+            self.prior_orders_df.select("user_id","order_id","order_dow","order_hour_of_day")
+            .join(df_with_count_of_dow, on="order_dow", how="left")
             .join(df_with_count_of_ohod, on="order_hour_of_day", how="left")
-        )
+        ).withColumnsRenamed({"order_dow":"dow","order_hour_of_day":"hour_of_day"})
         
         
-        long_cols = [field.name for field in result_df_with_time_df.schema.fields if isinstance(field.dataType, LongType)]
+        long_cols = [field.name for field in result_time_df.schema.fields if isinstance(field.dataType, LongType)]
         columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
-        result_df_with_time_df = result_df_with_time_df.withColumns(columns_to_cast)
-        return result_df_with_time_df
+        result_time_df = result_time_df.withColumns(columns_to_cast)
+        return result_time_df
 
 
     def generate_all_types_of_features(self):
         
         result_usr_prod_df = self.generate_user_product_related_features()
-        result_df_with_time_df = self.generate_time_related_features()
+        result_time_df = self.generate_time_related_features()
         result_product_df = self.generate_product_related_features()
-        
+        result_usr_df = self.generate_user_related_features()
+            
         final_prior_ord_train_df = (
-            result_usr_prod_df
-            .join(result_df_with_time_df.drop("user_id"), on="order_id", how="left")
-            .join(result_product_df.drop("user_id"), (F.col("product_id_p") == result_product_df['ppo1.product_id']), how="left")
-            .drop("product_id")
-            .withColumnsRenamed({"user_id_p":"user_id","product_id_p":"product_id"})
+            self.prior_product_orders.drop("add_to_cart_order")
+            .join(
+                result_time_df , on = 'order_id',how='left'
+            ).drop('order_id',"dow","hour_of_day")
+            .join(
+                result_usr_df , on = 'user_id',how='left'
+            )
+            .join(
+                result_product_df, on = 'product_id' , how = 'left'
+            )
+            .join(
+                result_usr_prod_df , on = ['user_id','product_id'] , how='left'
+            )
+            
         )
-        
+        long_cols = [field.name for field in final_prior_ord_train_df.schema.fields if isinstance(field.dataType, StringType)]
+        columns_to_cast = {col_name: F.col(col_name).cast(DoubleType()) for col_name in long_cols}
+        final_prior_ord_train_df = final_prior_ord_train_df.withColumns(columns_to_cast)
+
         return final_prior_ord_train_df
 
         
 def generate_test_set_features(user_stats_df,prods_stats_df,user_prod_stats_df,time_related_stats,test_set):
         
-    df_list = [user_stats_df,prods_stats_df,user_prod_stats_df]
+    user_df_list = [user_stats_df,user_prod_stats_df]
+    product_df_list = [prods_stats_df,user_prod_stats_df]
     
-    for i in df_list:
+    for i in user_df_list:
         
         if "user_id" not in i.columns:
             raise NameError(f"'user_id' is missing in {i}")
+            
+    for i in product_df_list:
         
-        elif "product_id" not in i.columns:
+        if "product_id" not in i.columns:
             raise NameError(f"'product_id' is missing in {i}")
         
     if "user_id"  not in test_set.columns and "product_id" not in test_set.columns:
@@ -375,11 +383,11 @@ def generate_test_set_features(user_stats_df,prods_stats_df,user_prod_stats_df,t
         raise NameError("'product_id' not found in test_set")
         
     else:
-        mean_dow_value = time_related_stats.groupBy("order_dow").agg(
+        mean_dow_value = time_related_stats.groupBy("dow").agg(
             F.mean("total_ord_count_p_dow")
         ).collect()[0][0]
         
-        mean_ohod_value = time_related_stats.groupBy("order_hour_of_day").agg(
+        mean_ohod_value = time_related_stats.groupBy("hour_of_day").agg(
             F.mean("total_ord_count_p_ohod")
         ).collect()[0][0]
         
@@ -392,7 +400,7 @@ def generate_test_set_features(user_stats_df,prods_stats_df,user_prod_stats_df,t
                 prods_stats_df, on = 'product_id', how = 'inner'
             )
             .join(
-                user-prod_stats_df, on = ['user_id','product_id'], how = 'inner'
+                user_prod_stats_df, on = ['user_id','product_id'], how = 'inner'
             )
             .withColumns({
                           "time_mean_dow_count":F.lit(mean_dow_value),
