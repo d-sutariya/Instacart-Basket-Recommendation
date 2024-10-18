@@ -150,7 +150,7 @@ class ModelTrainer:
                 params['booster'] = 'gbtree'
                 
             start = time.time()
-            xgb_gbm = xgb.train(params = params,dtrain=dtrain,num_boost_round=1)
+            xgb_gbm = xgb.train(params = params,dtrain=dtrain)
 
         else :
             params = {
