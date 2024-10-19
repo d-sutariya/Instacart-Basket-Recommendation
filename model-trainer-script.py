@@ -1,9 +1,10 @@
 class ModelTrainer:
     
-    def __init__(self,experiment_name,train_set,test_set=None):
+    def __init__(self,experiment_name,dask_client,train_set,test_set=None):
         self.train_set = train_set
         self.test_set = test_set
         self.exp_name = experiment_name
+        self.client = dask_client
         mlflow.set_experiment(self.exp_name)
 
     def __log_details(self,y_true,preds,prev_commit_hash,params,model=None):
@@ -38,8 +39,8 @@ class ModelTrainer:
         if model != None:
             
             explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(self.test_set.drop(["reordered"],axis=1))
-            shap.summary_plot(shap_values,self.test_set.drop(["reordered"],axis=1),show=False)
+            shap_values = explainer.shap_values(self.test_set.drop("reordered",axis=1).compute())
+            shap.summary_plot(shap_values,self.test_set.drop(["reordered"],axis=1).compute(),show=False)
             plt.savefig('shap_summary_plot.png',bbox_inches='tight')
             plt.close()
             mlflow.log_artifact('shap_summary_plot.png')
@@ -113,8 +114,8 @@ class ModelTrainer:
     
     def train_xgb_rf(self,prev_commit_hash,params=None):
         
-        dtrain = xgb.DMatrix(self.train_set.drop("reordered",axis=1), label = self.train_set['reordered'])
-        dtest = xgb.DMatrix(self.test_set.drop("reordered",axis=1), label = self.test_set['reordered'])
+        dtrain = dxgb.DaskDMatrix(self.client,self.train_set.drop("reordered",axis=1), label = self.train_set['reordered'])
+        dtest = dxgb.DaskDMatrix(self.client,self.test_set.drop("reordered",axis=1), label = self.test_set['reordered'])
         
         if params != None:
             
@@ -128,7 +129,7 @@ class ModelTrainer:
                 params['tree_method'] = 'hist'
                 
             start = time.time()
-            xgb_rf = xgb.train(params = params,dtrain=dtrain,num_boost_round=1)
+            xgb_rf = dxgb.train(self.client,params = params,dtrain=dtrain,num_boost_round=1)
 
         else :
             params = {
@@ -139,20 +140,20 @@ class ModelTrainer:
             }
             
             start = time.time()
-            xgb_rf = xgb.train(params = params,dtrain=dtrain,num_boost_round=1)
+            xgb_rf = dxgb.train(self.client,params = params,dtrain=dtrain,num_boost_round=1)
             
         duration = get_time(start)
-
+        
         with mlflow.start_run():
 
-            mlflow.xgboost.log_model(xgb_rf,"xgb_rf_model")
+            mlflow.xgboost.log_model(xgb_rf['booster'],"xgb_rf_model")
             
             mlflow.log_param("training_time",duration)
 
-            preds = xgb_rf.predict(dtest)
+            preds = dxgb.predict(self.client,xgb_rf, dtest)
             y_true = self.test_set['reordered']
 
-            self.__log_details(y_true,preds,prev_commit_hash,params,xgb_rf)
+            self.__log_details(y_true,preds,prev_commit_hash,params,xgb_rf['booster'])
        
         del y_true,preds,dtrain,dtest
         gc.collect()
@@ -160,8 +161,8 @@ class ModelTrainer:
 
     def train_xgb_gbm(self,prev_commit_hash,params=None):
         
-        dtrain = xgb.DMatrix(self.train_set.drop("reordered",axis=1), label = self.train_set['reordered'])
-        dtest = xgb.DMatrix(self.test_set.drop("reordered",axis=1), label = self.test_set['reordered'])
+        dtrain = dxgb.DaskDMatrix(self.client,self.train_set.drop("reordered",axis=1), label = self.train_set['reordered'])
+        dtest = dxgb.DaskDMatrix(self.client,self.test_set.drop("reordered",axis=1), label = self.test_set['reordered'])
         
         if params != None:
             
@@ -182,7 +183,8 @@ class ModelTrainer:
             }
         
         start = time.time()
-        xgb_gbm = xgb.train(params = params,
+        xgb_gbm = dxgb.train(self.client,
+                             params = params,
                             dtrain=dtrain,
                             evals = [(dtest,'eval')],
                             early_stopping_rounds=20,
@@ -192,22 +194,22 @@ class ModelTrainer:
 
         with mlflow.start_run():
 
-            mlflow.xgboost.log_model(xgb_gbm,"xgb_gbm_model")
+            mlflow.xgboost.log_model(xgb_gbm['booster'],"xgb_gbm_model")
             
             mlflow.log_param("training_time",duration)
 
-            preds = xgb_gbm.predict(dtest)
+            preds = dxgb.predict(self.client,xgb_gbm, dtest)
             y_true = self.test_set['reordered']
 
-            self.__log_details(y_true,preds,prev_commit_hash,params,xgb_gbm)
+            self.__log_details(y_true,preds,prev_commit_hash,params,xgb_gbm['booster'])
             
         del y_true,preds,dtrain,dtest
         gc.collect()
         return xgb_gbm
 
     def train_lgb_gbm(self,prev_commit_hash,params=None):
-        dtrain = lgb.Dataset(self.train_set.drop("reordered",axis=1),label=self.train_set['reordered'])
-        dtest = lgb.Dataset(self.test_set.drop("reordered",axis=1),label=self.test_set['reordered'],reference = dtrain)
+        # dtrain = lgb.DaskDataset(self.train_set.drop("reordered",axis=1),label=self.train_set['reordered'])
+        # dtest = lgb.DaskDataset(self.test_set.drop("reordered",axis=1),label=self.test_set['reordered'],reference = dtrain)
 
         if params != None:
             
@@ -229,14 +231,13 @@ class ModelTrainer:
             }
             
         start = time.time()
-        lgb_gbm = lgb.train(params,
-                            dtrain,
-                            valid_sets=[dtest],
-                            num_boost_round = 100 ,
-                            callbacks = [
-                                lgb.early_stopping(stopping_rounds = 20)
-                            ]
-            )
+        lgb_gbm = lgb.DaskLGBMClassifier(**params, n_estimators=100)
+        
+        lgb_gbm.fit(
+                    self.train_set.drop("reordered",axis=1),self.train_set["reordered"], 
+                  eval_set=[(self.test_set.drop("reordered",axis=1),self.test_set["reordered"])], 
+                  callbacks=[lgb.early_stopping(stopping_rounds=20)]
+                   )
 
             
         duration = get_time(start)
@@ -246,10 +247,10 @@ class ModelTrainer:
             mlflow.lightgbm.log_model(lgb_gbm,"lgb_gbm")
             
             mlflow.log_param("training_time",duration)
-            preds = lgb_gbm.predict(self.test_set.drop("reordered",axis=1))
+            preds = lgb_gbm.predict(self.test_set.drop("reordered",axis=1)).compute()
             y_true = self.test_set['reordered']
             self.__log_details(y_true,preds,prev_commit_hash,params,lgb_gbm)
             
-        del y_true,preds,dtrain,dtest
+        del y_true,preds
         gc.collect()
         return lgb_gbm
