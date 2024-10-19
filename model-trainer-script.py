@@ -6,7 +6,7 @@ class ModelTrainer:
         self.exp_name = experiment_name
         mlflow.set_experiment(self.exp_name)
 
-    def __log_details(self,y_true,preds,prev_commit_hash,params):
+    def __log_details(self,y_true,preds,prev_commit_hash,params,model=None):
         #log params 
         if params!=None:
                 mlflow.log_params(params)
@@ -35,6 +35,15 @@ class ModelTrainer:
         dataset_path = "https://www.kaggle.com/datasets/deepsutariya/instacart-exp-data" 
         mlflow.log_param("dataset url",dataset_path)
 
+        if model != None:
+            
+            explainer = shap.TreeExplainer(model)
+            shap_values = explainer.shap_values(self.test_set.drop(["reordered"],axis=1))
+            shap.summary_plot(shap_values,self.test_set.drop(["reordered"],axis=1),show=False)
+            plt.savefig('shap_summary_plot.png',bbox_inches='tight')
+            plt.close()
+            mlflow.log_artifact('shap_summary_plot.png')
+            
         mlflow.end_run()
     
     def train_h2o_glm(self,prev_commit_hash,params=None):
@@ -57,8 +66,8 @@ class ModelTrainer:
             # log dataset path,script path, environment
             self.__log_details(y_true,preds,prev_commit_hash,params)         
             
-            del y_true
-            del preds 
+            del y_true ,preds 
+            gc.collect()
         
         return h2o_logistic_model
 
@@ -96,9 +105,10 @@ class ModelTrainer:
             y_true = self.test_set['reordered'].as_data_frame()['reordered']
 
             # log evaluation metrics , dataset path,script path, environment
-            self.__log_details(y_true,preds,prev_commit_hash,params) 
+            self.__log_details(y_true,preds,prev_commit_hash,params,h2o_gbm) 
 
         del y_true,preds
+        gc.collect()
         return h2o_gbm
     
     def train_xgb_rf(self,prev_commit_hash,params=None):
@@ -110,6 +120,12 @@ class ModelTrainer:
             
             if 'booster' not in params.keys():
                 params['booster'] = 'gbtree'
+
+            if 'device' not in params.keys():
+                params['device'] = 'cuda'
+                
+            if 'tree_method' not in params.keys():
+                params['tree_method'] = 'hist'
                 
             start = time.time()
             xgb_rf = xgb.train(params = params,dtrain=dtrain,num_boost_round=1)
@@ -117,7 +133,9 @@ class ModelTrainer:
         else :
             params = {
                 'booster':'gbtree',
-                'objective':'binary:logistic'
+                'objective':'binary:logistic',
+                'device':'cuda',
+                'tree_method':'hist'
             }
             
             start = time.time()
@@ -134,9 +152,10 @@ class ModelTrainer:
             preds = xgb_rf.predict(dtest)
             y_true = self.test_set['reordered']
 
-            self.__log_details(y_true,preds,prev_commit_hash,params)
-            
+            self.__log_details(y_true,preds,prev_commit_hash,params,xgb_rf)
+       
         del y_true,preds,dtrain,dtest
+        gc.collect()
         return xgb_rf
 
     def train_xgb_gbm(self,prev_commit_hash,params=None):
@@ -148,19 +167,27 @@ class ModelTrainer:
             
             if 'booster' not in params.keys():
                 params['booster'] = 'gbtree'
-                
-            start = time.time()
-            xgb_gbm = xgb.train(params = params,dtrain=dtrain)
 
+            if 'device' not in params.keys():
+                params['device'] = 'cuda'
+
+            if 'tree_method' not in params.keys():
+                params['tree_method'] = 'hist'
         else :
             params = {
                 'booster':'gbtree',
-                'objective':'binary:logistic'
+                'objective':'binary:logistic',
+                'device':'cuda',
+                'tree_method':'hist'
             }
-            
-            start = time.time()
-            xgb_gbm = xgb.train(params = params,dtrain=dtrain)
-            
+        
+        start = time.time()
+        xgb_gbm = xgb.train(params = params,
+                            dtrain=dtrain,
+                            evals = [(dtest,'eval')],
+                            early_stopping_rounds=20,
+                            num_boost_round = 100
+        )   
         duration = get_time(start)
 
         with mlflow.start_run():
@@ -172,35 +199,45 @@ class ModelTrainer:
             preds = xgb_gbm.predict(dtest)
             y_true = self.test_set['reordered']
 
-            self.__log_details(y_true,preds,prev_commit_hash,params)
+            self.__log_details(y_true,preds,prev_commit_hash,params,xgb_gbm)
             
         del y_true,preds,dtrain,dtest
+        gc.collect()
         return xgb_gbm
 
     def train_lgb_gbm(self,prev_commit_hash,params=None):
-        
         dtrain = lgb.Dataset(self.train_set.drop("reordered",axis=1),label=self.train_set['reordered'])
         dtest = lgb.Dataset(self.test_set.drop("reordered",axis=1),label=self.test_set['reordered'],reference = dtrain)
 
         if params != None:
             
-            if  'verbose' not in params.keys():
-                params['verbose'] = -1
+            # if  'verbose' not in params.keys():
+            #     params['verbose'] = -1
                 
             if 'objective'  not in params.keys():
                 params['objective'] = 'binary'
+            
+            if 'device' not in params.keys():
+                params['device'] = 'gpu'
                 
-            start = time.time()
-            lgb_gbm = lgb.train(params,dtrain)
-
         else:
             
             params = {
-                'verbose':-1,
-                'objective':'binary'
+                # 'verbose':-1,
+                'objective':'binary',
+                'device':'gpu'
             }
-            start = time.time()
-            lgb_gbm = lgb.train(params,dtrain)
+            
+        start = time.time()
+        lgb_gbm = lgb.train(params,
+                            dtrain,
+                            valid_sets=[dtest],
+                            num_boost_round = 100 ,
+                            callbacks = [
+                                lgb.early_stopping(stopping_rounds = 20)
+                            ]
+            )
+
             
         duration = get_time(start)
 
@@ -211,7 +248,8 @@ class ModelTrainer:
             mlflow.log_param("training_time",duration)
             preds = lgb_gbm.predict(self.test_set.drop("reordered",axis=1))
             y_true = self.test_set['reordered']
-            self.__log_details(y_true,preds,prev_commit_hash,params)
+            self.__log_details(y_true,preds,prev_commit_hash,params,lgb_gbm)
             
         del y_true,preds,dtrain,dtest
+        gc.collect()
         return lgb_gbm
