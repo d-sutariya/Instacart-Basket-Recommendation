@@ -101,16 +101,16 @@ class ModelTrainer:
         start = time.time()
         xgb_gbm = xgb.train(params=params, dtrain=self.train_set[0],
                             evals=[(self.test_set, 'eval')],
-                            early_stopping_rounds=30,
-                            num_boost_round=250)
+                            early_stopping_rounds=50,
+                            num_boost_round=1000)
         
         if len(self.train_set) > 1:
             for dtrain in self.train_set[1:]:
                 xgb_gbm = xgb.train(params=params, 
                                   dtrain=dtrain,
                                     evals=[(self.test_set, 'eval')],
-                                    early_stopping_rounds=30,
-                                    num_boost_round=250, 
+                                    early_stopping_rounds=50,
+                                    num_boost_round=1000, 
                                     xgb_model=xgb_gbm)
 
         duration = time.time() - start
@@ -134,7 +134,8 @@ class ModelTrainer:
                 'booster': 'gbtree',
                 'objective': 'binary:logistic',
                 'device': 'cuda',
-                'tree_method': 'hist'
+                'tree_method': 'hist',
+                'verbosity': -1
             }
     
         start = time.time()
@@ -169,14 +170,16 @@ class ModelTrainer:
         if params is None:
             params = {
                 'objective': 'binary',
-                'device': 'gpu'
+                # 'device': 'cuda'
             }
     
         start = time.time()
         lgb_gbm = lgb.train(params=params,
                             train_set=self.train_set[0],
                             valid_sets=[self.test_set],
-                            early_stopping_rounds=30,
+                            callbacks = [
+                                lgb.early_stopping(stopping_rounds=30)
+                            ],
                             num_boost_round=250)
     
         if len(self.train_set) > 1:
@@ -184,9 +187,11 @@ class ModelTrainer:
                 lgb_gbm = lgb.train(params=params,
                                     train_set=dtrain,
                                     valid_sets=[self.test_set],
-                                    early_stopping_rounds=30,
+                                    callbacks = [
+                                        lgb.early_stopping(stopping_rounds=30)
+                                    ],
                                     num_boost_round=250,
-                                    lgb_model=lgb_gbm)
+                                    init_model=lgb_gbm)
     
         duration = time.time() - start
     
@@ -194,8 +199,8 @@ class ModelTrainer:
             mlflow.lightgbm.log_model(lgb_gbm, "lgb_gbm_model")
             mlflow.log_param("training_time", duration)
     
-            preds = lgb_gbm.predict(self.test_set)
-            y_true = self.test_set[self.target_column]
+            preds = lgb_gbm.predict(self.test_set.get_data())
+            y_true = self.test_set.get_label()
     
             self.__log_details(y_true, preds, prev_commit_hash, params, lgb_gbm)
     
