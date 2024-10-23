@@ -81,7 +81,7 @@ class ModelTrainer:
         gc.collect()
         return h2o_gbm
 
-    def train_xgb_gbm(self, prev_commit_hash, params=None):
+    def train_xgb_gbm(self, prev_commit_hash,dataset_version,model_version,params=None):
         
         if params is not None:
             if 'booster' not in params.keys():
@@ -97,30 +97,40 @@ class ModelTrainer:
                 'device': 'cuda',
                 'tree_method': 'hist'
             }
-        
+        progress = dict()
         start = time.time()
         xgb_gbm = xgb.train(params=params, dtrain=self.train_set[0],
-                            evals=[(self.test_set, 'eval')],
-                            early_stopping_rounds=50,
+                           evals=[(self.train_set[0],'train_logloss'),(self.test_set, 'test_logloss')],
+                           evals_result= progress,
+                            # early_stopping_rounds=50,
                             num_boost_round=1000)
         
         if len(self.train_set) > 1:
             for dtrain in self.train_set[1:]:
                 xgb_gbm = xgb.train(params=params, 
-                                  dtrain=dtrain,
-                                    evals=[(self.test_set, 'eval')],
-                                    early_stopping_rounds=50,
-                                    num_boost_round=1000, 
-                                    xgb_model=xgb_gbm)
+                                      dtrain=dtrain,
+                                       evals=[(dtrain,'train_logloss'),(self.test_set, 'test_logloss')],
+                                       evals_result= progress,
+                                        # early_stopping_rounds=50,
+                                        num_boost_round=1000, 
+                                        xgb_model=xgb_gbm)
 
         duration = time.time() - start
 
         with mlflow.start_run():
-            mlflow.xgboost.log_model(xgb_gbm, "xgb_gbm_model")
-            mlflow.log_param("training_time", duration)
-
-            
             preds = xgb_gbm.predict(self.test_set)
+            signature = infer_signature(self.train_set[0].get_data(),preds)
+            mlflow.set_tag("dataset_version",dataset_version)
+            mlflow.set_tag("model_version",model_version)
+            mlflow.xgboost.log_model(xgb_gbm, "xgb_gbm_model",signature=signature)
+            mlflow.log_param("training_time", duration)
+            
+            with open("loss_history.json", "w") as f:
+                json.dump(progress, f)
+
+            mlflow.log_artifact("loss_history.json")
+            
+            
             y_true = self.test_set.get_label()
             self.__log_details(y_true, preds, prev_commit_hash, params, xgb_gbm)
             
@@ -134,20 +144,21 @@ class ModelTrainer:
                 'booster': 'gbtree',
                 'objective': 'binary:logistic',
                 'device': 'cuda',
-                'tree_method': 'hist',
-                'verbosity': -1
+                'tree_method': 'hist'
             }
-    
+        progress = dict()
         start = time.time()
         xgb_rf = xgb.train(params=params, dtrain=self.train_set[0],
-                           evals=[(self.test_set, 'eval')],
+                           evals=[(self.train_set,'train_logloss'),(self.test_set, 'test_logloss')],
+                           evals_result= progress,
                            num_boost_round=1)
     
         if len(self.train_set) > 1:
             for dtrain in self.train_set[1:]:
                 xgb_rf = xgb.train(params=params,
                                    dtrain=dtrain,
-                                   evals=[(self.test_set, 'eval')],
+                                   evals=[(self.train_set,'train_logloss'),(self.test_set, 'test_logloss')],
+                                   evals_result= progress,
                                    num_boost_round=1,
                                    xgb_model=xgb_rf)
     
@@ -156,7 +167,10 @@ class ModelTrainer:
         with mlflow.start_run():
             mlflow.xgboost.log_model(xgb_rf, "xgb_rf_model")
             mlflow.log_param("training_time", duration)
-    
+            with open("loss_history.json", "w") as f:
+                json.dump(progress, f)
+
+            mlflow.log_artifact("loss_history.json")
             preds = xgb_rf.predict(self.test_set)
             y_true = self.test_set.get_label()
     
@@ -199,8 +213,8 @@ class ModelTrainer:
             mlflow.lightgbm.log_model(lgb_gbm, "lgb_gbm_model")
             mlflow.log_param("training_time", duration)
     
-            preds = lgb_gbm.predict(self.test_set.get_data())
-            y_true = self.test_set.get_label()
+            preds = lgb_gbm.predict(self.test_set)
+            y_true = self.test_set[self.target_column]
     
             self.__log_details(y_true, preds, prev_commit_hash, params, lgb_gbm)
     
