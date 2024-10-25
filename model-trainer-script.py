@@ -1,3 +1,4 @@
+# %% [code]
 class ModelTrainer:
     
     def __init__(self, experiment_name, train_set, test_set=None, target_column='reordered'):
