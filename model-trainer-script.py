@@ -180,19 +180,21 @@ class ModelTrainer:
         gc.collect()
         return xgb_rf
     
-    def train_lgb_gbm(self, prev_commit_hash, params=None):
+    def train_lgb_gbm(self, prev_commit_hash,dataset_version,model_version, params=None):
         if params is None:
             params = {
                 'objective': 'binary',
                 # 'device': 'cuda'
             }
-    
+        progress = dict()
         start = time.time()
         lgb_gbm = lgb.train(params=params,
                             train_set=self.train_set[0],
-                            valid_sets=[self.test_set],
+                            valid_sets=[self.train_set[0],self.test_set],
+                            valid_names = ['train_set',"test_set"],
                             callbacks = [
-                                lgb.early_stopping(stopping_rounds=30)
+                                lgb.early_stopping(stopping_rounds=30),
+                                lgb.record_evaluation(progress)
                             ],
                             num_boost_round=250)
     
@@ -200,21 +202,28 @@ class ModelTrainer:
             for dtrain in self.train_set[1:]:
                 lgb_gbm = lgb.train(params=params,
                                     train_set=dtrain,
-                                    valid_sets=[self.test_set],
+                                    valid_sets=[dtraub,self.test_set],
+                                    valid_names = ['train_set',"test_set"],
                                     callbacks = [
-                                        lgb.early_stopping(stopping_rounds=30)
+                                        lgb.early_stopping(stopping_rounds=30),
+                                        lgb.record_evaluation(progress)
                                     ],
                                     num_boost_round=250,
                                     init_model=lgb_gbm)
-    
+                
+        with open("loss_history.json","w") as f:
+            json.dump(progress,f)
+            
         duration = time.time() - start
     
         with mlflow.start_run():
+            mlflow.set_tag("dataset_version",dataset_version)
+            mlflow.set_tag("model_version",model_version)
             mlflow.lightgbm.log_model(lgb_gbm, "lgb_gbm_model")
             mlflow.log_param("training_time", duration)
-    
-            preds = lgb_gbm.predict(self.test_set)
-            y_true = self.test_set[self.target_column]
+            mlflow.log_artifact("loss_history.json")
+            preds = lgb_gbm.predict(self.test_set.get_data())
+            y_true = self.test_set.get_label()
     
             self.__log_details(y_true, preds, prev_commit_hash, params, lgb_gbm)
     
