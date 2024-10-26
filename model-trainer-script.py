@@ -1,4 +1,3 @@
-# %% [code]
 class ModelTrainer:
     
     def __init__(self, experiment_name, train_set, test_set=None, target_column='reordered'):
@@ -38,18 +37,31 @@ class ModelTrainer:
 
         mlflow.end_run()
     
-    def train_h2o_glm(self, prev_commit_hash, params=None):
+    def train_h2o_glm(self, prev_commit_hash,dataset_version,model_version, params=None):
+        start = time.time()
         h2o_logistic_model = H2OGeneralizedLinearEstimator(family='binomial') \
-                            .train(x=self.train_set.drop("reordered").columns, y='reordered', training_frame=self.train_set)
-        
+                            .train(x=self.train_set[0].drop("reordered").columns, y='reordered', training_frame=self.train_set[0])
+        duration = get_time(start)
         with mlflow.start_run():
+            
             mlflow.h2o.log_model(h2o_logistic_model, "h2o_logistic_model")
             mlflow.log_param("family", "binomial")
             mlflow.log_param("alpha", h2o_logistic_model.get_params()['alpha'])
             mlflow.log_param("lambda", h2o_logistic_model.get_params()['lambda'])
+            
+            mlflow.log_param("training_time", duration)            
+            mlflow.set_tag("dataset_version",dataset_version)
+            mlflow.set_tag("model_version",model_version)  
+            mlflow.set_tag("algorithm","h2o_glm")
+            
+            progress = h2o_logistic_model.scoring_history().to_dict()
+            
+            with open("loss_history.json", "w") as f:
+                json.dump(progress, f)
 
-            preds = h2o_logistic_model.predict(self.test_set).as_data_frame()['p1']
-            y_true = self.test_set['reordered']
+            mlflow.log_artifact("loss_history.json")
+            preds = h2o_logistic_model.predict(self.test_set).as_data_frame(use_multi_thread=True)['p1']
+            y_true = self.test_set['reordered'].as_data_frame(use_multi_thread=True)
 
             self.__log_details(y_true, preds, prev_commit_hash, params)         
             
@@ -58,23 +70,43 @@ class ModelTrainer:
         
         return h2o_logistic_model
 
-    def train_h2o_gbm(self, prev_commit_hash, params=None):
+    def train_h2o_gbm(self, prev_commit_hash,dataset_version,model_version, params=None):
+        
         if params is not None and "distribution" not in params.keys():
+            params['distribution'] = 'bernoulli'
+        
+        if params == None:
+            params = dict()
             params['distribution'] = 'bernoulli'
         
         start = time.time()
         h2o_gbm = H2OGradientBoostingEstimator(**params) \
-                  .train(x=self.train_set.drop("reordered").columns, y='reordered', training_frame=self.train_set)
+                  .train(x=self.train_set[0].drop("reordered").columns,
+                         y='reordered',
+                          training_frame=self.train_set[0],
+                        validation_frame=self.test_set,
+                         
+                        )
         
         duration = time.time() - start
         
         with mlflow.start_run():
             mlflow.h2o.log_model(h2o_gbm, "h2o_gbm_model")
             mlflow.log_params(params if params is not None else {})
-            mlflow.log_param("training_time", duration)
+            mlflow.log_param("training_time", duration)            
+            mlflow.set_tag("dataset_version",dataset_version)
+            mlflow.set_tag("model_version",model_version)  
+            mlflow.set_tag("algorithm","h2o_gbm")
+            
+            progress = h2o_gbm.scoring_history().to_dict()
+            with open("loss_history.json", "w") as f:
+                json.dump(progress, f)
 
-            preds = h2o_gbm.predict(self.test_set).as_data_frame()['p1']
-            y_true = self.test_set['reordered']
+            mlflow.log_artifact("loss_history.json")
+            
+
+            preds = h2o_gbm.predict(self.test_set).as_data_frame(use_multi_thread=True)['p1']
+            y_true = self.test_set['reordered'].as_data_frame(use_multi_thread=True)
 
             self.__log_details(y_true, preds, prev_commit_hash, params, h2o_gbm)
 
@@ -91,6 +123,9 @@ class ModelTrainer:
                 params['device'] = 'cuda'
             if 'tree_method' not in params.keys():
                 params['tree_method'] = 'hist'
+            if  'objective' not in params.keys():
+                params[ 'objective'] = 'binary:logistic'
+
         else:
             params = {
                 'booster': 'gbtree',
@@ -103,7 +138,7 @@ class ModelTrainer:
         xgb_gbm = xgb.train(params=params, dtrain=self.train_set[0],
                            evals=[(self.train_set[0],'train_logloss'),(self.test_set, 'test_logloss')],
                            evals_result= progress,
-                            # early_stopping_rounds=50,
+                            early_stopping_rounds=50,
                             num_boost_round=1000)
         
         if len(self.train_set) > 1:
@@ -112,7 +147,7 @@ class ModelTrainer:
                                       dtrain=dtrain,
                                        evals=[(dtrain,'train_logloss'),(self.test_set, 'test_logloss')],
                                        evals_result= progress,
-                                        # early_stopping_rounds=50,
+                                        early_stopping_rounds=50,
                                         num_boost_round=1000, 
                                         xgb_model=xgb_gbm)
 
@@ -123,6 +158,8 @@ class ModelTrainer:
             signature = infer_signature(self.train_set[0].get_data(),preds)
             mlflow.set_tag("dataset_version",dataset_version)
             mlflow.set_tag("model_version",model_version)
+            mlflow.set_tag("algorithm","xgb_gbm")
+            
             mlflow.xgboost.log_model(xgb_gbm, "xgb_gbm_model",signature=signature)
             mlflow.log_param("training_time", duration)
             
@@ -139,7 +176,8 @@ class ModelTrainer:
         gc.collect()
         return xgb_gbm
     
-    def train_xgb_rf(self, prev_commit_hash, params=None):
+    def train_xgb_rf(self, prev_commit_hash,dataset_version,model_version, params=None):
+        
         if params is None:
             params = {
                 'booster': 'gbtree',
@@ -150,7 +188,7 @@ class ModelTrainer:
         progress = dict()
         start = time.time()
         xgb_rf = xgb.train(params=params, dtrain=self.train_set[0],
-                           evals=[(self.train_set,'train_logloss'),(self.test_set, 'test_logloss')],
+                           evals=[(self.train_set[0],'train_logloss'),(self.test_set, 'test_logloss')],
                            evals_result= progress,
                            num_boost_round=1)
     
@@ -166,13 +204,21 @@ class ModelTrainer:
         duration = time.time() - start
     
         with mlflow.start_run():
-            mlflow.xgboost.log_model(xgb_rf, "xgb_rf_model")
+            
+           
+            preds = xgb_rf.predict(self.test_set)
             mlflow.log_param("training_time", duration)
+            mlflow.set_tag("algorithm","xgb_rf")
+            signature = infer_signature(self.train_set[0].get_data(),preds)
+            mlflow.xgboost.log_model(xgb_rf, "xgb_rf_model",signature=signature)
+            mlflow.set_tag("dataset_version",dataset_version)
+            mlflow.set_tag("model_version",model_version)
+           
             with open("loss_history.json", "w") as f:
                 json.dump(progress, f)
 
             mlflow.log_artifact("loss_history.json")
-            preds = xgb_rf.predict(self.test_set)
+            
             y_true = self.test_set.get_label()
     
             self.__log_details(y_true, preds, prev_commit_hash, params, xgb_rf)
@@ -218,8 +264,11 @@ class ModelTrainer:
         duration = time.time() - start
     
         with mlflow.start_run():
+            
             mlflow.set_tag("dataset_version",dataset_version)
             mlflow.set_tag("model_version",model_version)
+            mlflow.set_tag("algorithm","lgb_gbm")
+            
             mlflow.lightgbm.log_model(lgb_gbm, "lgb_gbm_model")
             mlflow.log_param("training_time", duration)
             mlflow.log_artifact("loss_history.json")
