@@ -1,3 +1,4 @@
+# %% [code]
 import time
 import os
 import gc
