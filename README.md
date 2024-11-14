@@ -44,7 +44,7 @@ To tackle the problem, I used a combination of feature engineering, distributed 
 
 1. **Reorder Patterns**: Users tend to reorder on the same day, the 7th day, or the 30th day after a previous order.![days_since_prior_order w.r.t count.png](https://github.com/d-sutariya/instacart_next_basket_prediction/blob/master/reports/figures/days_since_prior_order%20w.r.t%20count.png)
 2. **Peak Ordering Time**: Orders are mostly placed between 8 AM and 4 PM.![order distribution w.r.t order hour of day](https://github.com/d-sutariya/instacart_next_basket_prediction/blob/master/reports/figures/order%20distribution%20w.r.t%20order%20hour%20of%20day.png)
-4. **Product Preference**: Organic products are reordered 8% more frequently than non-organic products.![product type (Organic vs Inorganic)](https://github.com/d-sutariya/instacart_next_basket_prediction/blob/master/reports/figures/product%20type%20(Organic%20vsInorganic).png)
+4. **Product Preference**: Organic products are reordered 8% more frequently than non-organic products.![product type Organic vs Inorganic](https://github.com/d-sutariya/instacart_next_basket_prediction/blob/master/reports/figures/product%20type%20(Organic%20vsInorganic).png)
 5. **Department Reorder Rates**: Dairy, Eggs, Produce, Beverages, and Bakery have reorder rates above 65%, while Personal Care and Pantry have rates below 35%.![reorder percentage w.r.t department](https://github.com/d-sutariya/instacart_next_basket_prediction/blob/master/reports/figures/reorder%20percentage%20w.r.t%20department.png)
 
 ## Conclusion
